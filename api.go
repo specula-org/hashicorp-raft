@@ -145,6 +145,12 @@ type Raft struct {
 	// Used for our logging
 	logger hclog.Logger
 
+	// traceLogger emits structured trace events for TLA+ trace validation.
+	traceLogger TraceLogger
+
+	// traceVotedFor caches the votedFor value for trace state snapshots.
+	traceVotedFor ServerID
+
 	// LogStore provides durable storage for logs
 	logs LogStore
 
@@ -555,6 +561,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		localID:               localID,
 		localAddr:             localAddr,
 		logger:                logger,
+		traceLogger:           conf.TraceLogger,
 		logs:                  logs,
 		configurationChangeCh: make(chan *configurationChangeFuture),
 		configurations:        configurations{},

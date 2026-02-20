@@ -227,6 +227,17 @@ START:
 	}
 
 	// Make the RPC call
+	r.traceEvent("SendReplicateEntries", &TraceMsg{
+		Type:         "AppendEntriesRequest",
+		Subtype:      "replicate",
+		Term:         req.Term,
+		From:         string(r.localID),
+		To:           string(peer.ID),
+		PrevLogIndex: req.PrevLogEntry,
+		PrevLogTerm:  req.PrevLogTerm,
+		Entries:      len(req.Entries),
+		CommitIndex:  req.LeaderCommitIndex,
+	})
 	start = time.Now()
 	if err := r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp); err != nil {
 		r.logger.Error("failed to appendEntries to", "peer", peer, "error", err)
@@ -237,6 +248,14 @@ START:
 
 	// Check for a newer term, stop running
 	if resp.Term > req.Term {
+		r.traceEvent("HandleReplicateResponse", &TraceMsg{
+			Type:    "AppendEntriesResponse",
+			Subtype: "replicate",
+			Term:    resp.Term,
+			From:    string(peer.ID),
+			To:      string(r.localID),
+			Success: resp.Success,
+		})
 		r.handleStaleTerm(s)
 		return true
 	}
@@ -261,6 +280,15 @@ START:
 		}
 		r.logger.Warn("appendEntries rejected, sending older logs", "peer", peer, "next", atomic.LoadUint64(&s.nextIndex))
 	}
+	r.traceEvent("HandleReplicateResponse", &TraceMsg{
+		Type:       "AppendEntriesResponse",
+		Subtype:    "replicate",
+		Term:       resp.Term,
+		From:       string(peer.ID),
+		To:         string(r.localID),
+		Success:    resp.Success,
+		MatchIndex: atomic.LoadUint64(&s.nextIndex) - 1,
+	})
 
 CHECK_MORE:
 	// Poll the stop channel here in case we are looping and have been asked
@@ -408,6 +436,13 @@ func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
 		peer := s.peer
 		s.peerLock.RUnlock()
 
+		r.traceEvent("SendHeartbeat", &TraceMsg{
+			Type:    "AppendEntriesRequest",
+			Subtype: "heartbeat",
+			Term:    req.Term,
+			From:    string(r.localID),
+			To:      string(peer.ID),
+		})
 		start := time.Now()
 		if err := r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp); err != nil {
 			nextBackoffTime := cappedExponentialBackoff(failureWait, failures, maxFailureScale, r.config().HeartbeatTimeout/2)
@@ -425,6 +460,14 @@ func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
 				r.observe(ResumedHeartbeatObservation{PeerID: peer.ID})
 			}
 			s.setLastContact()
+			r.traceEvent("HandleHeartbeatResponse", &TraceMsg{
+				Type:    "AppendEntriesResponse",
+				Subtype: "heartbeat",
+				Term:    resp.Term,
+				From:    string(peer.ID),
+				To:      string(r.localID),
+				Success: resp.Success,
+			})
 			failures = 0
 			labels := []metrics.Label{{Name: "peer_id", Value: string(peer.ID)}}
 			metrics.MeasureSinceWithLabels([]string{"raft", "replication", "heartbeat"}, start, labels)
@@ -516,6 +559,22 @@ func (r *Raft) pipelineSend(s *followerReplication, p AppendPipeline, nextIdx *u
 		return true
 	}
 
+	// Emit trace event for the send (mirrors replicateTo instrumentation)
+	s.peerLock.RLock()
+	peer := s.peer
+	s.peerLock.RUnlock()
+	r.traceEvent("SendReplicateEntries", &TraceMsg{
+		Type:         "AppendEntriesRequest",
+		Subtype:      "replicate",
+		Term:         req.Term,
+		From:         string(r.localID),
+		To:           string(peer.ID),
+		PrevLogIndex: req.PrevLogEntry,
+		PrevLogTerm:  req.PrevLogTerm,
+		Entries:      len(req.Entries),
+		CommitIndex:  req.LeaderCommitIndex,
+	})
+
 	// Pipeline the append entries
 	if _, err := p.AppendEntries(req, new(AppendEntriesResponse)); err != nil {
 		r.logger.Error("failed to pipeline appendEntries", "peer", s.peer, "error", err)
@@ -546,6 +605,14 @@ func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, 
 
 			// Check for a newer term, stop running
 			if resp.Term > req.Term {
+				r.traceEvent("HandleReplicateResponse", &TraceMsg{
+					Type:    "AppendEntriesResponse",
+					Subtype: "replicate",
+					Term:    resp.Term,
+					From:    string(peer.ID),
+					To:      string(r.localID),
+					Success: resp.Success,
+				})
 				r.handleStaleTerm(s)
 				return
 			}
@@ -555,11 +622,28 @@ func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, 
 
 			// Abort pipeline if not successful
 			if !resp.Success {
+				r.traceEvent("HandleReplicateResponse", &TraceMsg{
+					Type:    "AppendEntriesResponse",
+					Subtype: "replicate",
+					Term:    resp.Term,
+					From:    string(peer.ID),
+					To:      string(r.localID),
+					Success: resp.Success,
+				})
 				return
 			}
 
 			// Update our replication state
 			updateLastAppended(s, req)
+			r.traceEvent("HandleReplicateResponse", &TraceMsg{
+				Type:       "AppendEntriesResponse",
+				Subtype:    "replicate",
+				Term:       resp.Term,
+				From:       string(peer.ID),
+				To:         string(r.localID),
+				Success:    resp.Success,
+				MatchIndex: atomic.LoadUint64(&s.nextIndex) - 1,
+			})
 		case <-stopCh:
 			return
 		}

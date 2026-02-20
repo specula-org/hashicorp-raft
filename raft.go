@@ -368,6 +368,7 @@ func (r *Raft) runCandidate() {
 				r.logger.Debug("newer term discovered, fallback to follower", "term", vote.Term)
 				r.setState(Follower)
 				r.setCurrentTerm(vote.Term)
+				r.traceVotedFor = ""
 				return
 			}
 
@@ -376,6 +377,13 @@ func (r *Raft) runCandidate() {
 				grantedVotes++
 				r.logger.Debug("vote granted", "from", vote.voterID, "term", vote.Term, "tally", grantedVotes)
 			}
+			r.traceEvent("HandleRequestVoteResponse", &TraceMsg{
+				Type:        "RequestVoteResponse",
+				Term:        vote.Term,
+				From:        string(vote.voterID),
+				To:          string(r.localID),
+				VoteGranted: vote.Granted,
+			})
 
 			// Check if we've become the leader
 			if grantedVotes >= votesNeeded {
@@ -494,6 +502,7 @@ func (r *Raft) runLeader() {
 	// setup leader state. This is only supposed to be accessed within the
 	// leaderloop.
 	r.setupLeaderState()
+	r.traceEvent("BecomeLeader", nil)
 
 	// Run a background go-routine to emit metrics on log age
 	stopCh := make(chan struct{})
@@ -789,6 +798,9 @@ func (r *Raft) leaderLoop() {
 			oldCommitIndex := r.getCommitIndex()
 			commitIndex := r.leaderState.commitment.getCommitIndex()
 			r.setCommitIndex(commitIndex)
+			if commitIndex > oldCommitIndex {
+				r.traceEvent("AdvanceCommitIndex", nil)
+			}
 
 			// New configuration has been committed, set it as the committed
 			// value.
@@ -1238,6 +1250,11 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
 	r.setLatestConfiguration(configuration, index)
 	r.leaderState.commitment.setConfiguration(configuration)
 	r.startStopReplication()
+
+	// Emit trace event for TLA+ trace validation.
+	r.traceEvent("ProposeConfigChange", &TraceMsg{
+		To: string(future.req.serverID),
+	})
 }
 
 // dispatchLog is called on the leader to push a log to disk, mark it
@@ -1450,6 +1467,17 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	}
 	var rpcErr error
 	defer func() {
+		r.traceEvent("HandleAppendEntriesRequest", &TraceMsg{
+			Type:         "AppendEntriesRequest",
+			Term:         a.Term,
+			From:         string(a.ID),
+			To:           string(r.localID),
+			PrevLogIndex: a.PrevLogEntry,
+			PrevLogTerm:  a.PrevLogTerm,
+			Entries:      len(a.Entries),
+			CommitIndex:  a.LeaderCommitIndex,
+			Success:      resp.Success,
+		})
 		rpc.Respond(resp, rpcErr)
 	}()
 
@@ -1464,6 +1492,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 		// Ensure transition to follower
 		r.setState(Follower)
 		r.setCurrentTerm(a.Term)
+		r.traceVotedFor = ""
 		resp.Term = a.Term
 	}
 
@@ -1612,7 +1641,17 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		Granted:   false,
 	}
 	var rpcErr error
+	var candidateID string
 	defer func() {
+		r.traceEvent("HandleRequestVoteRequest", &TraceMsg{
+			Type:         "RequestVoteRequest",
+			Term:         req.Term,
+			From:         candidateID,
+			To:           string(r.localID),
+			VoteGranted:  resp.Granted,
+			LastLogTerm:  req.LastLogTerm,
+			LastLogIndex: req.LastLogIndex,
+		})
 		rpc.Respond(resp, rpcErr)
 	}()
 
@@ -1635,6 +1674,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		candidate = r.trans.DecodePeer(req.Candidate)
 		candidateBytes = req.Candidate
 	}
+	candidateID = string(req.ID)
 
 	// For older raft version ID is not part of the packed message
 	// We assume that the peer is part of the configuration and skip this check
@@ -1667,6 +1707,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		r.logger.Debug("lost leadership because received a requestVote with a newer term")
 		r.setState(Follower)
 		r.setCurrentTerm(req.Term)
+		r.traceVotedFor = ""
 
 		resp.Term = req.Term
 	}
@@ -1729,6 +1770,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		return
 	}
 
+	r.traceVotedFor = ServerID(req.ID)
 	resp.Granted = true
 	r.setLastContact()
 }
@@ -2024,6 +2066,8 @@ func (r *Raft) electSelf() <-chan *voteResult {
 					return nil
 
 				}
+				r.traceVotedFor = r.localID
+				r.traceEvent("BecomeCandidate", nil)
 				// Include our own vote
 				respCh <- &voteResult{
 					RequestVoteResponse: RequestVoteResponse{

@@ -226,6 +226,10 @@ type Config struct {
 	// LogOutput with LogLevel is used.
 	Logger hclog.Logger
 
+	// TraceLogger is an optional structured event logger for TLA+ trace validation.
+	// When set, Raft emits TraceEvents at key state transitions.
+	TraceLogger TraceLogger
+
 	// NoSnapshotRestoreOnStart controls if raft will restore a snapshot to the
 	// FSM on start. This is useful if your FSM recovers from other mechanisms
 	// than raft snapshotting. Snapshot metadata will still be used to initialize
